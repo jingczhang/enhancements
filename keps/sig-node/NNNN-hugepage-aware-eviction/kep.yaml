@@ -1,0 +1,30 @@
+title: Hugepage-Aware Memory Eviction
+kep-number: NNNN
+authors:
+  - "@jingczhang"
+owning-sig: sig-node
+participating-sigs:
+status: provisional
+creation-date: 2026-03-19
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+stage: alpha
+
+latest-milestone: "v1.36"
+
+milestone:
+  alpha: "v1.36"
+  beta: "v1.37"
+  stable: "v1.38"
+
+feature-gates:
+  - name: HugepageAwareEviction
+    components:
+      - kubelet
+disable-supported: true
+
+metrics:
+  - eviction_hugepage_adjustment_bytes
