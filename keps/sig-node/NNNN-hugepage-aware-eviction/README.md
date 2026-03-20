@@ -144,7 +144,7 @@ clamping to zero if hugepage capacity exceeds available bytes.
 
 #### Story 1
 
-As a cluster administrator running workloads that require 2Mi hugepages
+As a cluster administrator running workloads that require 1Gi hugepages
 alongside regular pods on the same nodes, I want eviction to trigger at the
 correct real memory threshold without needing to manually inflate
 `evictionHard.memory.available`. Currently, I must add the hugepage size to
@@ -177,40 +177,32 @@ thresholds, increasing operational complexity.
 
 | Parameter | Value |
 |---|---|
-| `MemTotal` | 64 GiB |
-| Hugepages (2Mi × 2048) | 4 GiB |
-| Regular memory available | 60 GiB |
-| `evictionHard.memory.available` | 5754 Mi |
+| `MemTotal` | 192 GiB |
+| Hugepages  |  20 GiB |
+| Regular memory available | 172 GiB |
+| `evictionHard.memory.available` | 6 GiB |
 
-Without the fix, the eviction manager sees ~64 GiB total and subtracts
+Without the fix, the eviction manager sees ~192 GiB total and subtracts
 `WorkingSet` (which excludes hugepage usage). Eviction fires when
-`64 GiB - WorkingSet < 5754 Mi`, i.e., when `WorkingSet > ~58.4 GiB`. But
-only 60 GiB of regular memory exists, so actual regular memory is exhausted
-when `WorkingSet ≈ 60 GiB`—leaving a ~1.6 GiB gap where eviction should have
+`192 GiB - WorkingSet < 6 GiB`, i.e., when `WorkingSet > 186 GiB`. But
+only 172 GiB of regular memory exists, so actual regular memory is exhausted
+when `WorkingSet ≈ 172 GiB`—leaving a 14 GiB gap where eviction should have
 fired but didn't, risking OOM kills.
 
 **Workaround-induced density loss:**
 
-Operators inflate the threshold to `5754 Mi + 4096 Mi = 9850 Mi`. This fixes
-eviction timing, but the inflated 9850 Mi feeds into
+Operators inflate the threshold to `6 Gi + 20 Gi = 26 Gi`. This fixes
+eviction timing, but the inflated 26 Gi feeds into
 `nodeAllocatableReservation`, which is subtracted from `Capacity[memory]`
-alongside the explicit hugepage subtraction. The net effect is that 4 GiB of
-hugepage memory is subtracted twice, reducing `Allocatable[memory]` by 4 GiB
+alongside the explicit hugepage subtraction. The net effect is that 20 GiB of
+hugepage memory is subtracted twice, reducing `Allocatable[memory]` by 20 GiB
 more than necessary.
 
 ### Risks and Mitigations
 
-**Risk:** Subtracting hugepage capacity could make `AvailableBytes` lower than
-expected if hugepages are deallocated at runtime while the node still reports
-them in `Capacity`.
-
-**Mitigation:** Hugepage reservations are typically static and configured at
-boot via kernel parameters. Dynamic hugepage changes are rare and the
-adjustment clamps to zero, so this cannot cause negative values or panics.
-
 **Risk:** The fix changes the effective eviction threshold for existing clusters
 that have already applied the inflation workaround, potentially causing earlier
-eviction.
+eviction than intended (double adjustment).
 
 **Mitigation:** The feature is gated behind `HugepageAwareEviction` (default
 disabled). Operators should remove the workaround inflation from their
@@ -242,6 +234,17 @@ reservation.
 The eviction manager in `pkg/kubelet/eviction/helpers.go` maps
 `SignalMemoryAvailable` directly to `v1.ResourceMemory` and reads
 `AvailableBytes` from the node summary stats. It has no awareness of hugepages.
+
+**The kernel already gets this right.** The `MemAvailable` field in
+`/proc/meminfo` correctly excludes hugepage-reserved memory. When hugepages
+are allocated at boot, those pages are removed from the buddy allocator's free
+pool, so `MemFree` does not include them, and `MemAvailable` (which is derived
+from `MemFree` plus reclaimable caches) also excludes them. The kubelet's
+cgroup-based computation diverges from the kernel's own accounting because it
+uses `MemTotal` (which includes hugepages) as the ceiling and `WorkingSet`
+(which excludes hugetlb) as the floor—a combination that the kernel itself
+avoids. The proposed fix brings the kubelet's `memory.available` signal back
+in line with what the kernel reports via `MemAvailable`.
 
 ### Proposed Fix
 
@@ -371,7 +374,7 @@ For Alpha, we will add a node e2e test that:
 
 **Upgrade:** After enabling the `HugepageAwareEviction` feature gate, operators
 should remove any hugepage inflation from their `evictionHard.memory.available`
-and `reservedMemory` configurations. The eviction signal will now correctly
+configuration. The eviction signal will now correctly
 exclude hugepage memory, so the original (non-inflated) thresholds should be
 used. `Allocatable[memory]` will increase by the hugepage amount, allowing more
 pods to be scheduled.
@@ -487,9 +490,8 @@ memory within the existing eviction manager polling interval (default 10s).
 
 ###### Are there any missing metrics that would be useful to have to improve observability of this feature?
 
-A metric exposing the hugepage adjustment amount
-(`eviction_hugepage_adjustment_bytes`) would be useful for debugging. This
-will be added as part of the implementation.
+No additional metrics are needed. The existing `eviction_signal_memory_available`
+metric already reflects the corrected value when the fix is active.
 
 ### Dependencies
 
@@ -576,24 +578,13 @@ by the elimination of the workaround and improved pod density.
 
 ## Alternatives
 
-**Alternative 1: Fix at the cAdvisor level.** Modify cAdvisor to set the root
-cgroup memory limit to `MemTotal - HugePages_Total` instead of `MemTotal`.
-This was rejected because it would affect all cAdvisor consumers, not just
-the kubelet eviction manager, and could break other monitoring tools that
-expect the limit to equal `MemTotal`.
-
-**Alternative 2: Fix in the eviction manager.** Modify the eviction signal
-observation code in `pkg/kubelet/eviction/helpers.go` to subtract hugepages.
-This was rejected because the eviction manager does not currently have access
-to `Node.Status.Capacity` and adding this dependency would increase coupling.
-
-**Alternative 3: Add a dedicated `hugepages.available` eviction signal.**
+**Alternative 1: Add a dedicated `hugepages.available` eviction signal.**
 This would allow operators to set separate thresholds for hugepage memory.
 This was rejected as over-engineering for this bug fix—the core issue is that
 the existing `memory.available` signal is incorrect, not that a new signal is
 needed.
 
-**Alternative 4: Kernel/cgroup fix.** Have the kernel include hugetlb
+**Alternative 2: Kernel/cgroup fix.** Have the kernel include hugetlb
 allocations in the memory cgroup's `WorkingSet`. This is outside the scope
 of the Kubernetes project and would require kernel changes that may not be
 accepted upstream.

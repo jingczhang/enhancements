@@ -26,5 +26,4 @@ feature-gates:
       - kubelet
 disable-supported: true
 
-metrics:
-  - eviction_hugepage_adjustment_bytes
+metrics: []
