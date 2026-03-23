@@ -584,10 +584,18 @@ This was rejected as over-engineering for this bug fix—the core issue is that
 the existing `memory.available` signal is incorrect, not that a new signal is
 needed.
 
-**Alternative 2: Kernel/cgroup fix.** Have the kernel include hugetlb
-allocations in the memory cgroup's `WorkingSet`. This is outside the scope
-of the Kubernetes project and would require kernel changes that may not be
-accepted upstream.
+**Alternative 2: Read `MemAvailable` from `/proc/meminfo` directly.**
+The kernel's `MemAvailable` already correctly excludes hugepage-reserved
+memory (hugepages are allocated from the buddy allocator at boot and never
+appear in `MemFree`). However, this would be a much larger behavioral change:
+`MemAvailable` is system-wide and does not respect cgroup memory limits (e.g.,
+`kubepods.slice/memory.max`), so it cannot be used for the
+`allocatableMemory.available` eviction signal. It is also a kernel heuristic
+that includes assumptions about reclaimable memory that may not match the
+eviction manager's `limit - workingSet` model, changing eviction timing for
+all nodes—not just hugepage nodes. The proposed fix targets the exact
+mismatch (hugepages in the limit but not in the working set) without altering
+the broader eviction calculation.
 
 ## Infrastructure Needed (Optional)
 
